@@ -8,8 +8,13 @@ find_package(SDL3 REQUIRED)
 
 add_executable(nes
     src/main.c
+    src/util.c
+    src/aids.c
 )
 
+target_compile_definitions(nes PRIVATE
+    $<$<CONFIG:Debug>:DEBUG_BUILD=1>
+)
 target_include_directories(nes PRIVATE 
     ${SDL3_INCLUDE_DIRS}
     include

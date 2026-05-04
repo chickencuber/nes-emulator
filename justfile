@@ -12,6 +12,9 @@ dev:
 run-dev: dev
     {{build_dir}}/dev/nes
 
+run-gf2: dev
+    gf2 {{build_dir}}/dev/nes
+
 release:
     cmake -S . -B {{build_dir}}/release \
         -DCMAKE_BUILD_TYPE=Release \
