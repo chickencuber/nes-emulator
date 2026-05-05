@@ -1,4 +1,5 @@
 #define NO_DEBUG
+#include <SDL3/SDL_events.h>
 #include <SDL3/SDL_rect.h>
 #include <SDL3/SDL_render.h>
 #include <SDL3/SDL_video.h>
@@ -11,7 +12,9 @@
 
 #include <SDL3/SDL.h>
 
-#define SCALE 3
+// TASK(20260505-161630-763-n6-804): clean this file
+
+#define SCALE 4
 
 #define WIDTH 256
 #define HEIGHT 240
@@ -155,79 +158,101 @@ void ppu_vram_write(PPU* ppu, uint16_t addr, uint8_t val) {
 }
 
 uint8_t cpu_read(CPU* cpu, PPU* ppu, uint16_t addr) {
-    // internal ram
+    // 0x0000–0x1FFF: internal RAM (mirror every 2KB)
     if (addr < 0x2000) {
         return cpu->cpu_ram[addr & 0x07FF];
     }
-    // cartridge rom
+
+    // 0x2000–0x3FFF: PPU registers (mirrored every 8 bytes)
+    if (addr < 0x4000) {
+        uint16_t reg = 0x2000 + (addr & 7);
+
+        switch (reg) {
+        case 0x2002: {
+            uint8_t val = ppu->status;
+            ppu->status &= ~0x80; // clear vblank
+            ppu->latch = 0;
+            return val;
+        }
+
+        default:
+            return 0;
+        }
+    }
+
+    // 0x8000–0xFFFF: cartridge ROM
     if (addr >= 0x8000) {
         size_t offset = addr - 0x8000;
 
-        // Mapper 0: 16KB mirroring
         if (cpu->cart->info.prg_banks == 1) {
             offset &= 0x3FFF;
         }
 
         return cpu->cart->prg_rom.buf[offset];
     }
-    if (addr >= 0x2000 && addr < 0x4000) {
-        uint16_t reg = 0x2000 + (addr % 8);
 
-        if (reg == 0x2002) {
-            uint8_t val = ppu->status;
-            ppu->status &= ~0x80; // clear vblank
-            ppu->latch = 0;       // reset latch
-            return val;
-        }
-
-        return 0;
-    }
     // TASK(20260502-134138-467-n6-189): handle other addresses in read
+    printf(";asking for unimplemented %04X in read\n", addr);
     return 0;
 }
 
 void cpu_write(CPU* cpu, PPU* ppu, uint16_t addr, uint8_t value) {
-    // internal ram
+    // 0x0000–0x1FFF: internal RAM (includes stack!)
     if (addr < 0x2000) {
         cpu->cpu_ram[addr & 0x07FF] = value;
-    }
-    if (addr >= 0x2000 && addr < 0x4000) {
-        addr = 0x2000 + (addr % 8);
-    }
-    // ROM - ignores writes
-    if (addr >= 0x8000) {
-        return;
-    }
-    if (addr == 0x2006) {
-        if (!ppu->latch) {
-            ppu->temp_addr = (value << 8);
-            ppu->latch = 1;
-        } else {
-            ppu->temp_addr |= value;
-            ppu->vram_addr = ppu->temp_addr;
-            ppu->latch = 0;
-        }
         return;
     }
 
-    if (addr == 0x2007) {
-        debug("PPU WRITE: %04X <- %02X\n", ppu->vram_addr, value);
-        ppu_vram_write(ppu, ppu->vram_addr, value);
-        if (ppu->control & 0x04)
-            ppu->vram_addr += 32;
-        else
-            ppu->vram_addr += 1;
+    // 0x2000–0x3FFF: PPU registers (mirrored every 8 bytes)
+    if (addr < 0x4000) {
+        uint16_t reg = 0x2000 + (addr & 7);
+
+        switch (reg) {
+
+        case 0x2000:
+            ppu->control = value;
+            return;
+
+        case 0x2005:
+            ppu->latch ^= 1;
+            return;
+
+        case 0x2006:
+            if (!ppu->latch) {
+                ppu->temp_addr = value << 8;
+                ppu->latch = 1;
+            } else {
+                ppu->temp_addr |= value;
+                ppu->vram_addr = ppu->temp_addr;
+                ppu->latch = 0;
+            }
+            return;
+
+        case 0x2007:
+            debug("PPU WRITE: %04X <- %02X\n", ppu->vram_addr, value);
+
+            ppu_vram_write(ppu, ppu->vram_addr, value);
+
+            ppu->vram_addr += (ppu->control & 0x04) ? 32 : 1;
+            return;
+
+        default:
+            return;
+        }
+    }
+
+    if (addr >= 0x4000 && addr <= 0x4017) {
+        // TASK(20260505-162005-313-n6-469): implement sound
+        debug("; sound not implemented");
         return;
     }
-    if (addr == 0x2000) {
-        ppu->control = value;
+    // 0x8000–0xFFFF: ROM (ignored writes)
+    if (addr >= 0x8000) {
         return;
     }
-    if (addr == 0x2005) {
-        ppu->latch ^= 1;
-        return;
-    }
+
     // TASK(20260502-141946-173-n6-290): handle other addresses for writes
+    printf(";asking for unimplemented %04X in write\n", addr);
 }
 
 CPU create_cpu(Cartridge* cart) {
@@ -253,291 +278,550 @@ enum Flag {
 
 static inline bool get_flag(CPU* cpu, Flag f) { return (cpu->P >> f) & 1; }
 
-static inline void set_flag(CPU* cpu, Flag f, bool val) {
+static inline uint8_t set_flag(uint8_t p, Flag f, bool val) {
     if (val) {
-        cpu->P |= (1 << f);
+        return p | (1 << f) | (1 << FLAG_U); // flag u always 1
     } else {
-        cpu->P &= ~(1 << f);
+        return (p & ~(1 << f)) | (1 << FLAG_U); // flag u always 1
     }
 }
 
-void cpu_step(CPU* cpu, PPU* ppu) {
-    uint8_t opcode = cpu_read(cpu, ppu, cpu->PC++);
+static inline void set_flag_mut(CPU* cpu, Flag f, bool val) {
+    cpu->P = set_flag(cpu->P, f, val);
+}
 
+static inline bool page_crossed(uint16_t a, uint16_t b) {
+    return (a & 0xFF00) != (b & 0xFF00);
+}
+
+#define INCPC                                                                  \
+    ({                                                                         \
+        opcodelen++;                                                           \
+        cpu_read(cpu, ppu, cpu->PC++);                                         \
+    })
+
+#define PUSH(s) cpu_write(cpu, ppu, 0x0100 + (cpu->S--), (s))
+
+#define POP cpu_read(cpu, ppu, 0x0100 + (++cpu->S))
+
+int cpu_step(CPU* cpu, PPU* ppu) {
+    int opcodelen = 0;
+    uint8_t opcode = INCPC;
+
+    // TASK(20260505-170156-448-n6-762): add debug messages to what I missed
     // TASK(20260502-211526-008-n6-146): reorganize the order of this
     switch (opcode) {
     case 0xA9: { // LDA immediate
-        uint8_t value = cpu_read(cpu, ppu, cpu->PC++);
+        uint8_t value = INCPC;
         cpu->A = value;
-        set_flag(cpu, FLAG_Z, value == 0);
-        set_flag(cpu, FLAG_N, value & 0x80);
-        debug("%04X: LDA #$%02X\n", cpu->PC - 2, value);
-        break;
+        set_flag_mut(cpu, FLAG_Z, value == 0);
+        set_flag_mut(cpu, FLAG_N, value & 0x80);
+        debug("%04X: LDA #$%02X\n", cpu->PC - opcodelen, value);
+        return 2;
     }
     case 0xAD: { // LDA absolute
-        uint8_t lo = cpu_read(cpu, ppu, cpu->PC++);
-        uint8_t hi = cpu_read(cpu, ppu, cpu->PC++);
+        uint8_t lo = INCPC;
+        uint8_t hi = INCPC;
         uint16_t addr = lo | (hi << 8);
         cpu->A = cpu_read(cpu, ppu, addr);
-        set_flag(cpu, FLAG_Z, cpu->A == 0);
-        set_flag(cpu, FLAG_N, cpu->A & 0x80);
-        debug("%04X: LDA $%04X => %02X\n", cpu->PC - 3, addr, cpu->A);
-        break;
+        set_flag_mut(cpu, FLAG_Z, cpu->A == 0);
+        set_flag_mut(cpu, FLAG_N, cpu->A & 0x80);
+        debug("%04X: LDA $%04X => %02X\n", cpu->PC - opcodelen, addr, cpu->A);
+        return 4;
     }
     case 0xA5: { // LDA zero page
-        uint8_t addr = cpu_read(cpu, ppu, cpu->PC++);
+        uint8_t addr = INCPC;
         cpu->A = cpu_read(cpu, ppu, addr);
-        set_flag(cpu, FLAG_Z, cpu->A == 0);
-        set_flag(cpu, FLAG_N, cpu->A & 0x80);
-        debug("%04X: LDA $%02X => %02X\n", cpu->PC - 2, addr, cpu->A);
-        break;
+        set_flag_mut(cpu, FLAG_Z, cpu->A == 0);
+        set_flag_mut(cpu, FLAG_N, cpu->A & 0x80);
+        debug("%04X: LDA $%02X => %02X\n", cpu->PC - opcodelen, addr, cpu->A);
+        return 3;
     }
     case 0xBD: { // LDA absolute,X
-        uint8_t lo = cpu_read(cpu, ppu, cpu->PC++);
-        uint8_t hi = cpu_read(cpu, ppu, cpu->PC++);
+        uint8_t lo = INCPC;
+        uint8_t hi = INCPC;
         uint16_t base = lo | (hi << 8);
 
         uint16_t addr = base + cpu->X;
 
         cpu->A = cpu_read(cpu, ppu, addr);
 
-        set_flag(cpu, FLAG_Z, cpu->A == 0);
-        set_flag(cpu, FLAG_N, cpu->A & 0x80);
+        set_flag_mut(cpu, FLAG_Z, cpu->A == 0);
+        set_flag_mut(cpu, FLAG_N, cpu->A & 0x80);
 
-        debug("%04X: LDA $%04X,X => %02X\n", cpu->PC - 3, base, cpu->A);
-        break;
+        bool crossed = page_crossed(base, addr);
+
+        debug("%04X: LDA $%04X,X => %02X\n", cpu->PC - opcodelen, base, cpu->A);
+        return crossed ? 5 : 4;
     }
 
     case 0x8D: { // STA absolute
-        uint8_t lo = cpu_read(cpu, ppu, cpu->PC++);
-        uint8_t hi = cpu_read(cpu, ppu, cpu->PC++);
+        uint8_t lo = INCPC;
+        uint8_t hi = INCPC;
         uint16_t addr = lo | (hi << 8);
         cpu_write(cpu, ppu, addr, cpu->A);
-        debug("%04X: STA $%04X <= %02X\n", cpu->PC - 3, addr, cpu->A);
-        break;
+        debug("%04X: STA $%04X <= %02X\n", cpu->PC - opcodelen, addr, cpu->A);
+        return 4;
     }
     case 0x85: { // STA zero page
-        uint8_t addr = cpu_read(cpu, ppu, cpu->PC++);
+        uint8_t addr = INCPC;
         cpu_write(cpu, ppu, addr, cpu->A);
-        debug("%04X: STA $%02X <= %02X\n", cpu->PC - 2, addr, cpu->A);
-        break;
+        debug("%04X: STA $%02X <= %02X\n", cpu->PC - opcodelen, addr, cpu->A);
+        return 3;
+    }
+    case 0x91: { // STA (zp),Y
+        uint8_t zp = INCPC;
+
+        uint8_t lo = cpu_read(cpu, ppu, zp);
+        uint8_t hi = cpu_read(cpu, ppu, (zp + 1) & 0xFF);
+
+        uint16_t base = (lo | (hi << 8));
+        uint16_t addr = base + cpu->Y;
+
+        cpu_write(cpu, ppu, addr, cpu->A);
+        bool crossed = page_crossed(base, addr);
+
+        debug("%04X: STA ($%02X),Y => %04X <= %02X\n", cpu->PC - opcodelen, zp,
+              addr, cpu->A);
+        return crossed ? 7 : 6;
+    }
+    case 0x99: { // STA abs,Y
+        uint8_t lo = INCPC;
+        uint8_t hi = INCPC;
+
+        uint16_t base = lo | (hi << 8);
+        uint16_t addr = base + cpu->Y;
+
+        cpu_write(cpu, ppu, addr, cpu->A);
+
+        return 5;
     }
 
     case 0x48: { // PHA
-        cpu_write(cpu, ppu, 0x0100 + cpu->S--, cpu->A);
-        debug("%04X: PHA; (pushed $%02X)\n", cpu->PC - 1, cpu->A);
-        break;
+        PUSH(cpu->A);
+        debug("%04X: PHA; (pushed $%02X)\n", cpu->PC - opcodelen, cpu->A);
+        return 3;
     }
     case 0x68: { // PLA
-        cpu->A = cpu_read(cpu, ppu, 0x0100 + cpu->S++);
-        debug("%04X: PLA; (pulled $%02X)\n", cpu->PC - 1, cpu->A);
-        break;
+        cpu->A = POP;
+        debug("%04X: PLA; (pulled $%02X)\n", cpu->PC - opcodelen, cpu->A);
+        return 4;
     }
 
     case 0xA2: { // LDX immediate
-        uint8_t value = cpu_read(cpu, ppu, cpu->PC++);
+        uint8_t value = INCPC;
         cpu->X = value;
-        set_flag(cpu, FLAG_Z, value == 0);
-        set_flag(cpu, FLAG_N, value & 0x80);
-        debug("%04X: LDX #$%02X\n", cpu->PC - 2, value);
-        break;
+        set_flag_mut(cpu, FLAG_Z, value == 0);
+        set_flag_mut(cpu, FLAG_N, value & 0x80);
+        debug("%04X: LDX #$%02X\n", cpu->PC - opcodelen, value);
+        return 2;
     }
     case 0xAE: { // LDX absolute
-        uint8_t lo = cpu_read(cpu, ppu, cpu->PC++);
-        uint8_t hi = cpu_read(cpu, ppu, cpu->PC++);
+        uint8_t lo = INCPC;
+        uint8_t hi = INCPC;
         uint16_t addr = lo | (hi << 8);
         cpu->X = cpu_read(cpu, ppu, addr);
-        set_flag(cpu, FLAG_Z, cpu->X == 0);
-        set_flag(cpu, FLAG_N, cpu->X & 0x80);
-        debug("%04X: LDX $%04X => %02X\n", cpu->PC - 3, addr, cpu->X);
-        break;
+        set_flag_mut(cpu, FLAG_Z, cpu->X == 0);
+        set_flag_mut(cpu, FLAG_N, cpu->X & 0x80);
+        debug("%04X: LDX $%04X => %02X\n", cpu->PC - opcodelen, addr, cpu->X);
+        return 4;
     }
     case 0xA6: { // LDX zero page
-        uint8_t addr = cpu_read(cpu, ppu, cpu->PC++);
+        uint8_t addr = INCPC;
         cpu->X = cpu_read(cpu, ppu, addr);
-        set_flag(cpu, FLAG_Z, cpu->X == 0);
-        set_flag(cpu, FLAG_N, cpu->X & 0x80);
-        debug("%04X: LDX $%02X => %02X\n", cpu->PC - 2, addr, cpu->X);
-        break;
+        set_flag_mut(cpu, FLAG_Z, cpu->X == 0);
+        set_flag_mut(cpu, FLAG_N, cpu->X & 0x80);
+        debug("%04X: LDX $%02X => %02X\n", cpu->PC - opcodelen, addr, cpu->X);
+        return 3;
+    }
+
+    case 0xCA: { // DEX
+        cpu->X--;
+        set_flag_mut(cpu, FLAG_Z, cpu->X == 0);
+        set_flag_mut(cpu, FLAG_N, cpu->X & 0x80);
+        debug("%04X: DEX => %02X\n", cpu->PC - opcodelen, cpu->X);
+        return 2;
+    }
+
+    case 0xE0: { // CPX
+        uint8_t value = INCPC;
+        uint8_t result = cpu->X - value;
+
+        set_flag_mut(cpu, FLAG_C, cpu->X >= value);
+        set_flag_mut(cpu, FLAG_Z, cpu->X == value);
+        set_flag_mut(cpu, FLAG_N, result & 0x80);
+        debug("%04X: CPX\n", cpu->PC - opcodelen);
+        return 2;
     }
 
     case 0x8E: { // STX absolute
-        uint8_t lo = cpu_read(cpu, ppu, cpu->PC++);
-        uint8_t hi = cpu_read(cpu, ppu, cpu->PC++);
+        uint8_t lo = INCPC;
+        uint8_t hi = INCPC;
         uint16_t addr = lo | (hi << 8);
         cpu_write(cpu, ppu, addr, cpu->X);
-        debug("%04X: STX $%04X <= %02X\n", cpu->PC - 3, addr, cpu->X);
-        break;
+        debug("%04X: STX $%04X <= %02X\n", cpu->PC - opcodelen, addr, cpu->X);
+        return 4;
+    }
+    case 0x86: { // STX zero page
+        uint8_t addr = INCPC;
+        cpu_write(cpu, ppu, addr, cpu->X);
+        debug("%04X: STX $%02X <= %02X\n", cpu->PC - opcodelen, addr, cpu->X);
+        return 3;
     }
 
     case 0xA0: { // LDY immediate
-        uint8_t value = cpu_read(cpu, ppu, cpu->PC++);
+        uint8_t value = INCPC;
         cpu->Y = value;
-        set_flag(cpu, FLAG_Z, value == 0);
-        set_flag(cpu, FLAG_N, value & 0x80);
-        debug("%04X: LDY #$%02X\n", cpu->PC - 2, value);
-        break;
+        set_flag_mut(cpu, FLAG_Z, value == 0);
+        set_flag_mut(cpu, FLAG_N, value & 0x80);
+        debug("%04X: LDY #$%02X\n", cpu->PC - opcodelen, value);
+        return 2;
     }
     case 0xAC: { // LDY absolute
-        uint8_t lo = cpu_read(cpu, ppu, cpu->PC++);
-        uint8_t hi = cpu_read(cpu, ppu, cpu->PC++);
+        uint8_t lo = INCPC;
+        uint8_t hi = INCPC;
         uint16_t addr = lo | (hi << 8);
         cpu->Y = cpu_read(cpu, ppu, addr);
-        set_flag(cpu, FLAG_Z, cpu->Y == 0);
-        set_flag(cpu, FLAG_N, cpu->Y & 0x80);
-        debug("%04X: LDY $%04X => %02X\n", cpu->PC - 3, addr, cpu->Y);
-        break;
+        set_flag_mut(cpu, FLAG_Z, cpu->Y == 0);
+        set_flag_mut(cpu, FLAG_N, cpu->Y & 0x80);
+        debug("%04X: LDY $%04X => %02X\n", cpu->PC - opcodelen, addr, cpu->Y);
+        return 4;
     }
     case 0xA4: { // LDY zero page
-        uint8_t addr = cpu_read(cpu, ppu, cpu->PC++);
+        uint8_t addr = INCPC;
         cpu->Y = cpu_read(cpu, ppu, addr);
-        set_flag(cpu, FLAG_Z, cpu->Y == 0);
-        set_flag(cpu, FLAG_N, cpu->Y & 0x80);
-        debug("%04X: LDY $%02X => %02X\n", cpu->PC - 2, addr, cpu->Y);
-        break;
+        set_flag_mut(cpu, FLAG_Z, cpu->Y == 0);
+        set_flag_mut(cpu, FLAG_N, cpu->Y & 0x80);
+        debug("%04X: LDY $%02X => %02X\n", cpu->PC - opcodelen, addr, cpu->Y);
+        return 3;
     }
 
     case 0x8C: { // STY absolute
-        uint8_t lo = cpu_read(cpu, ppu, cpu->PC++);
-        uint8_t hi = cpu_read(cpu, ppu, cpu->PC++);
+        uint8_t lo = INCPC;
+        uint8_t hi = INCPC;
         uint16_t addr = lo | (hi << 8);
         cpu_write(cpu, ppu, addr, cpu->Y);
-        debug("%04X: STY $%04X <= %02X\n", cpu->PC - 3, addr, cpu->Y);
-        break;
+        debug("%04X: STY $%04X <= %02X\n", cpu->PC - opcodelen, addr, cpu->Y);
+        return 4;
     }
 
+    case 0x88: { // DEY
+        cpu->Y--;
+        set_flag_mut(cpu, FLAG_Z, cpu->Y == 0);
+        set_flag_mut(cpu, FLAG_N, cpu->Y & 0x80);
+        debug("%04X: DEY => %02X\n", cpu->PC - opcodelen, cpu->Y);
+        return 2;
+    }
+    case 0xC8: { // INY
+        cpu->Y++;
+        set_flag_mut(cpu, FLAG_Z, cpu->Y == 0);
+        set_flag_mut(cpu, FLAG_N, cpu->Y & 0x80);
+        debug("%04X: INY => %02X\n", cpu->PC - opcodelen, cpu->Y);
+        return 2;
+    }
+
+    case 0xC0: { // CPY
+        uint8_t value = INCPC;
+        uint8_t result = cpu->Y - value;
+
+        set_flag_mut(cpu, FLAG_C, cpu->Y >= value);
+        set_flag_mut(cpu, FLAG_Z, cpu->Y == value);
+        set_flag_mut(cpu, FLAG_N, result & 0x80);
+        debug("%04X: CPY; (%02X)\n", cpu->PC - opcodelen, value);
+        return 2;
+    }
+
+    case 0x19: { // ORA abs,Y
+        uint8_t lo = INCPC;
+        uint8_t hi = INCPC;
+        uint16_t base = (lo | (hi << 8));
+        uint16_t addr = base + cpu->Y;
+
+        uint8_t value = cpu_read(cpu, ppu, addr);
+        bool crossed = page_crossed(base, addr);
+
+        cpu->A |= value;
+
+        set_flag_mut(cpu, FLAG_Z, cpu->A == 0);
+        set_flag_mut(cpu, FLAG_N, cpu->A & 0x80);
+
+        debug("%04X: ORA $%04X,Y => A=%02X\n", cpu->PC - opcodelen,
+              addr - cpu->Y, cpu->A);
+        return crossed ? 5 : 4;
+    }
+    case 0x09: { // ORA immediate
+        uint8_t value = INCPC;
+
+        cpu->A |= value;
+
+        set_flag_mut(cpu, FLAG_Z, cpu->A == 0);
+        set_flag_mut(cpu, FLAG_N, cpu->A & 0x80);
+
+        return 2;
+    }
+    case 0x29: { // AND immediate
+        uint8_t value = INCPC;
+
+        cpu->A &= value;
+
+        set_flag_mut(cpu, FLAG_Z, cpu->A == 0);
+        set_flag_mut(cpu, FLAG_N, cpu->A & 0x80);
+
+        return 2;
+    }
     case 0x08: { // PHP
-        cpu_write(cpu, ppu, 0x0100 + cpu->S--, cpu->P);
-        debug("%04X: PHP; (pushed $%02X)\n", cpu->PC - 1, cpu->P);
-        break;
+        PUSH(cpu->P);
+        debug("%04X: PHP; (pushed $%02X)\n", cpu->PC - opcodelen, cpu->P);
+        return 3;
     }
     case 0x28: { // PLP
-        cpu->P = cpu_read(cpu, ppu, 0x0100 + cpu->S++);
-        debug("%04X: PLP; (pulled $%02X)\n", cpu->PC - 1, cpu->P);
-        break;
+        cpu->P = POP;
+        debug("%04X: PLP; (pulled $%02X)\n", cpu->PC - opcodelen, cpu->P);
+        return 4;
     }
 
     case 0x9A: { // TXS
         cpu->S = cpu->X;
-        debug("%04X: TXS; (S = %02X)\n", cpu->PC - 1, cpu->S);
-        break;
+        debug("%04X: TXS; (S = %02X)\n", cpu->PC - opcodelen, cpu->S);
+        return 2;
+    }
+    case 0x8A: { // TXA
+        cpu->A = cpu->X;
+
+        set_flag_mut(cpu, FLAG_Z, cpu->A == 0);
+        set_flag_mut(cpu, FLAG_N, cpu->A & 0x80);
+
+        return 2;
+    }
+
+
+    case 0xFE: { // INC abs,X
+        uint8_t lo = INCPC;
+        uint8_t hi = INCPC;
+
+        uint16_t base = lo | (hi << 8);
+        uint16_t addr = base + cpu->X;
+
+        uint8_t value = cpu_read(cpu, ppu, addr);
+        value++;
+
+        cpu_write(cpu, ppu, addr, value);
+
+        set_flag_mut(cpu, FLAG_Z, value == 0);
+        set_flag_mut(cpu, FLAG_N, value & 0x80);
+
+        return 7;
+    }
+    case 0xEE: { // INC abs
+        uint8_t lo = INCPC;
+        uint8_t hi = INCPC;
+
+        uint16_t addr= lo | (hi << 8);
+
+        uint8_t value = cpu_read(cpu, ppu, addr);
+        value++;
+
+        cpu_write(cpu, ppu, addr, value);
+
+        set_flag_mut(cpu, FLAG_Z, value == 0);
+        set_flag_mut(cpu, FLAG_N, value & 0x80);
+
+        return 6;
+    }
+
+    case 0x00: { // BRK
+        INCPC;
+
+        uint16_t ret = cpu->PC + 1;
+
+        PUSH(ret >> 8);
+        PUSH(ret & 0xFF);
+
+        uint8_t p = set_flag(cpu->P, FLAG_B, true);
+        PUSH(p);
+
+        set_flag_mut(cpu, FLAG_I, true);
+        uint16_t lo = cpu_read(cpu, ppu, 0xFFFE);
+        uint16_t hi = cpu_read(cpu, ppu, 0xFFFF);
+
+        debug("%04X: BRK triggered => %04X\n", cpu->PC - opcodelen,
+              lo | (hi << 8));
+        cpu->PC = lo | (hi << 8);
+
+        return 7;
     }
 
     case 0x4C: { // JMP
-        uint8_t lo = cpu_read(cpu, ppu, cpu->PC++);
-        uint8_t hi = cpu_read(cpu, ppu, cpu->PC++);
+        uint8_t lo = INCPC;
+        uint8_t hi = INCPC;
         uint16_t addr = lo | (hi << 8);
-        debug("%04X: JMP $%04X\n", cpu->PC - 3, addr);
+        debug("%04X: JMP $%04X\n", cpu->PC - opcodelen, addr);
         cpu->PC = addr;
-        break;
+        return 3;
     }
     case 0x20: { // JSR absolute
-        uint8_t lo = cpu_read(cpu, ppu, cpu->PC++);
-        uint8_t hi = cpu_read(cpu, ppu, cpu->PC++);
+        uint8_t lo = INCPC;
+        uint8_t hi = INCPC;
         uint16_t addr = lo | (hi << 8);
 
         uint16_t return_addr = cpu->PC - 1;
 
-        cpu_write(cpu, ppu, 0x0100 + cpu->S--, (return_addr >> 8));
-        cpu_write(cpu, ppu, 0x0100 + cpu->S--, (return_addr & 0xFF));
+        PUSH(return_addr >> 8);
+        PUSH(return_addr & 0xFF);
 
-        debug("%04X: JSR $%04X (ret=$%04X)\n", cpu->PC - 3, addr, cpu->PC - 1);
+        debug("%04X: JSR $%04X (ret=$%04X)\n", cpu->PC - opcodelen, addr,
+              return_addr);
         cpu->PC = addr;
-        break;
+        return 6;
     }
     case 0x60: { // RTS
-        uint8_t lo = cpu_read(cpu, ppu, 0x0100 + cpu->S++);
-        uint8_t hi = cpu_read(cpu, ppu, 0x0100 + cpu->S++);
+        uint8_t lo = POP;
+
+        uint8_t hi = POP;
         uint16_t addr = (lo | (hi << 8)) + 1;
 
-        debug("%04X: RTS (ret=$%04X)\n", cpu->PC - 1, addr);
+        debug("%04X: RTS (ret=$%04X)\n", cpu->PC - opcodelen, addr);
         cpu->PC = addr;
-        break;
+        return 6;
     }
     // flag branching
     case 0xF0: { // BEQ
-        int8_t offset = (int8_t)cpu_read(cpu, ppu, cpu->PC++);
-        debug("%04X: BEQ %d\n", cpu->PC - 2, offset);
+        int8_t offset = (int8_t)INCPC;
+        debug("%04X: BEQ %d\n", cpu->PC - opcodelen, offset);
         if (get_flag(cpu, FLAG_Z)) {
             cpu->PC += offset;
             debug("; Branched to $%04X\n", cpu->PC);
+            return 3;
         }
-        break;
+        return 2;
     }
     case 0xD0: { // BNE
-        int8_t offset = (int8_t)cpu_read(cpu, ppu, cpu->PC++);
-        debug("%04X: BNE %d\n", cpu->PC - 2, offset);
+        int8_t offset = (int8_t)INCPC;
+        debug("%04X: BNE %d\n", cpu->PC - opcodelen, offset);
         if (!get_flag(cpu, FLAG_Z)) {
             cpu->PC += offset;
             debug("; Branched to $%04X\n", cpu->PC);
+            return 3;
         }
-        break;
+        return 2;
     }
     case 0x30: { // BMI
-        int8_t offset = (int8_t)cpu_read(cpu, ppu, cpu->PC++);
-        debug("%04X: BMI %d\n", cpu->PC - 2, offset);
+        int8_t offset = (int8_t)INCPC;
+        debug("%04X: BMI %d\n", cpu->PC - opcodelen, offset);
         if (get_flag(cpu, FLAG_N)) {
             cpu->PC += offset;
             debug("; Branched to $%04X\n", cpu->PC);
+            return 3;
         }
-        break;
+        return 2;
     }
     case 0x10: { // BPL
-        int8_t offset = (int8_t)cpu_read(cpu, ppu, cpu->PC++);
-        debug("%04X: BPL %d\n", cpu->PC - 2, offset);
+        int8_t offset = (int8_t)INCPC;
+        debug("%04X: BPL %d\n", cpu->PC - opcodelen, offset);
         if (!get_flag(cpu, FLAG_N)) {
             cpu->PC += offset;
             debug("; Branched to $%04X\n", cpu->PC);
+            return 3;
         }
-        break;
+        return 2;
     }
     case 0x90: { // BCC
-        int8_t offset = (int8_t)cpu_read(cpu, ppu, cpu->PC++);
-        debug("%04X: BCC %d\n", cpu->PC - 2, offset);
+        int8_t offset = (int8_t)INCPC;
+        debug("%04X: BCC %d\n", cpu->PC - opcodelen, offset);
         if (!get_flag(cpu, FLAG_C)) {
             cpu->PC += offset;
             debug("; Branched to $%04X\n", cpu->PC);
+            return 3;
         }
-        break;
+        return 2;
     }
     case 0xB0: { // BCS
-        int8_t offset = (int8_t)cpu_read(cpu, ppu, cpu->PC++);
-        debug("%04X: BCS %d\n", cpu->PC - 2, offset);
+        int8_t offset = (int8_t)INCPC;
+        debug("%04X: BCS %d\n", cpu->PC - opcodelen, offset);
         if (get_flag(cpu, FLAG_C)) {
             cpu->PC += offset;
             debug("; Branched to $%04X\n", cpu->PC);
+            return 3;
         }
-        break;
+        return 2;
     }
 
     case 0x78: { // SEI
-        set_flag(cpu, FLAG_I, true);
-        debug("%04X: SEI\n", cpu->PC - 1);
-        break;
+        set_flag_mut(cpu, FLAG_I, true);
+        debug("%04X: SEI\n", cpu->PC - opcodelen);
+        return 2;
     }
     case 0xD8: { // CLD
-        set_flag(cpu, FLAG_D, false);
-        debug("%04X: CLD\n", cpu->PC - 1);
-        break;
+        set_flag_mut(cpu, FLAG_D, false);
+        debug("%04X: CLD\n", cpu->PC - opcodelen);
+        return 2;
     }
     case 0xC9: { // CMP IMMEDIATE
-        uint8_t value = cpu_read(cpu, ppu, cpu->PC++);
+        uint8_t value = INCPC;
 
         uint8_t result = cpu->A - value;
 
-        set_flag(cpu, FLAG_C, cpu->A >= value);
-        set_flag(cpu, FLAG_Z, result == 0);
-        set_flag(cpu, FLAG_N, result & 0x80);
+        set_flag_mut(cpu, FLAG_C, cpu->A >= value);
+        set_flag_mut(cpu, FLAG_Z, result == 0);
+        set_flag_mut(cpu, FLAG_N, result & 0x80);
 
-        debug("%04X: CMP #$%02X\n", cpu->PC - 2, value);
-        break;
+        debug("%04X: CMP #$%02X\n", cpu->PC - opcodelen, value);
+        return 2;
     }
 
+    case 0x1E: { // ASL abs,X
+        uint8_t lo = INCPC;
+        uint8_t hi = INCPC;
+        uint16_t base = lo | (hi << 8);
+
+        uint16_t addr = base + cpu->X;
+
+        uint8_t value = cpu_read(cpu, ppu, addr);
+
+        bool crossed = page_crossed(base, addr);
+
+        set_flag_mut(cpu, FLAG_C, value & 0x80);
+
+        value <<= 1;
+
+        cpu_write(cpu, ppu, addr, value);
+
+        set_flag_mut(cpu, FLAG_Z, value == 0);
+        set_flag_mut(cpu, FLAG_N, value & 0x80);
+
+        debug("%04X: ASL $%04X,X => %02X\n", cpu->PC - opcodelen, base, value);
+        return crossed ? 8 : 7;
+    }
+
+    case 0x1C: // NOP abs X (unofficial)
+        INCPC;
+        INCPC;
+        debug("%04X: NOP\n", cpu->PC - opcodelen);
+        return 4;
+    case 0x82: // NOP immediate (unnoficial)
+        INCPC;
+        /*fallthrough*/
+    case 0x1A:
+        /*fallthrough*/
     case 0xEA: // NOP
-        debug("%04X: NOP\n", cpu->PC - 1);
-        break;
+        debug("%04X: NOP\n", cpu->PC - opcodelen);
+        return 2;
+    case 0x2C: { // BIT absolute
+        uint8_t lo = INCPC;
+        uint8_t hi = INCPC;
+        uint16_t addr = lo | (hi << 8);
+
+        uint8_t m = cpu_read(cpu, ppu, addr);
+
+        set_flag_mut(cpu, FLAG_Z, (cpu->A & m) == 0);
+        set_flag_mut(cpu, FLAG_N, m & 0x80);
+        set_flag_mut(cpu, FLAG_V, m & 0x40);
+
+        return 4;
+    }
     default:
-        printf("%04X: %02X; was not implimented\n", cpu->PC - 1, opcode);
+        printf("%04X: %02X; was not implimented\n", cpu->PC - opcodelen,
+               opcode);
         exit(0);
         break;
     }
@@ -646,6 +930,8 @@ void ppu_step(PPU* ppu) {
     }
 }
 
+#define FRAME_CYCLES 29780
+
 int main() {
     ByteSlice data;
     Result res =
@@ -680,14 +966,16 @@ int main() {
     while (running) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_EVENT_QUIT) {
+            switch (e.type) {
+            case SDL_EVENT_QUIT:
                 running = false;
+                break;
             }
         }
-        for (int i = 0; i < 29780; i++) {
-            cpu_step(&cpu, &ppu);
 
-            for (int j = 0; j < 3; j++) {
+        for (int _ = 0; _ < FRAME_CYCLES; _++) {
+            int cycles = cpu_step(&cpu, &ppu);
+            for (int i = 0; i < cycles * 3; i++) {
                 ppu_step(&ppu);
             }
         }
