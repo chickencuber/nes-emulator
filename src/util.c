@@ -1,7 +1,7 @@
 #include <aids.h>
 #include <error.h>
 #include <stdio.h>
-#include <types.h>
+#include <util.h>
 
 bool is_err(Result r) { return r.kind == Result_Err; }
 bool is_ok(Result r) { return r.kind == Result_Ok; }

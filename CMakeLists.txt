@@ -9,7 +9,7 @@ find_package(SDL3 REQUIRED)
 add_executable(nes
     src/main.c
     src/util.c
-    src/aids.c
+    src/cpu.c
 )
 
 target_compile_definitions(nes PRIVATE
