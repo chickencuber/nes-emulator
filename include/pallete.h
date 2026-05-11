@@ -1,5 +1,6 @@
 #include <stdint.h>
-static const uint32_t nes_palette[64] = {
+#include <ints.h>
+static const u32 nes_palette[64] = {
     0x666666, 0x002A88, 0x1412A7, 0x3B00A4,
     0x5C007E, 0x6E0040, 0x6C0600, 0x561D00,
     0x333500, 0x0B4800, 0x005200, 0x004F08,

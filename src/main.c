@@ -1,4 +1,5 @@
 #include <SDL3/SDL_events.h>
+#include <SDL3/SDL_keycode.h>
 #include <SDL3/SDL_rect.h>
 #include <SDL3/SDL_render.h>
 #include <SDL3/SDL_video.h>
@@ -53,15 +54,14 @@ CPU create_cpu(Cartridge* cart) {
     return cpu;
 }
 
-void render_frame(SDL_Renderer* r, SDL_Texture* tex, uint32_t* fb) {
+void render_frame(SDL_Renderer* r, SDL_Texture* tex, u32* fb) {
     void* pixels;
     int pitch;
 
     SDL_LockTexture(tex, NULL, &pixels, &pitch);
-    memcpy(pixels, fb, WIDTH * HEIGHT * sizeof(uint32_t));
+    memcpy(pixels, fb, WIDTH * HEIGHT * sizeof(u32));
     SDL_UnlockTexture(tex);
 
-    SDL_RenderClear(r);
     SDL_RenderTexture(r, tex, NULL, NULL);
 }
 
@@ -74,14 +74,17 @@ PPU create_ppu(CPU* cpu) {
     return ppu;
 }
 
-uint32_t ppu_get_pixel(PPU* ppu, int x, int y) {
-    // 1. tile coordinates
-    int tile_x = x / 8;
-    int tile_y = y / 8;
+u32 ppu_get_pixel(PPU* ppu, int x, int y) {
+    int world_x = x + ppu->scroll_x;
+    int world_y = y + ppu->scroll_y;
+    world_x &= 0x1FF;
+    world_y &= 0x1FF;
 
-    // 2. pixel inside tile
-    int px = x % 8;
-    int py = y % 8;
+    int tile_x = world_x / 8;
+    int tile_y = world_y / 8;
+
+    int px = world_x % 8;
+    int py = world_y % 8;
 
     // 3. nametable lookup
     int nametable_index = tile_y * 32 + tile_x;
@@ -89,7 +92,8 @@ uint32_t ppu_get_pixel(PPU* ppu, int x, int y) {
 
     // 4. CHR fetch
     u8* chr = ppu->chr_rom->buf;
-    u16 tile_addr = tile_id * 16;
+    u16 base = (ppu->control & 0x10) ? 0x1000 : 0x0000;
+    u16 tile_addr = base + tile_id * 16;
 
     u8 plane0 = chr[tile_addr + py];
     u8 plane1 = chr[tile_addr + py + 8];
@@ -126,19 +130,14 @@ uint32_t ppu_get_pixel(PPU* ppu, int x, int y) {
     return 0xFF000000 | nes_palette[nes_color_index & 0x3F];
 }
 
-void ppu_render(PPU* ppu) {
-    for (int y = 0; y < HEIGHT; y++) {
-        for (int x = 0; x < WIDTH; x++) {
-            ppu->fb[y * WIDTH + x] = ppu_get_pixel(ppu, x, y);
-        }
-    }
-}
-
-bool a = false;
-
 void ppu_step(PPU* ppu, CPU* cpu) {
     ppu->cycle++;
 
+    int dot = ppu->cycle - 1;
+    int scan = ppu->scanline;
+    if (scan < 240 && dot < 256) {
+        ppu->fb[scan * WIDTH + dot] = ppu_get_pixel(ppu, dot, scan); //ARGB
+    }
     if (ppu->cycle >= 341) {
         ppu->cycle = 0;
         ppu->scanline++;
@@ -148,10 +147,10 @@ void ppu_step(PPU* ppu, CPU* cpu) {
         }
     }
     if (ppu->scanline == 241 && ppu->cycle == 1) {
+        ppu->status &= ~0x40;
         ppu->status |= 0x80;
         if (ppu->control & 0x80)
             cpu->nmi_pending = true;
-        ppu_render(ppu);
     }
 
     if (ppu->scanline == 261 && ppu->cycle == 1) {
@@ -160,6 +159,48 @@ void ppu_step(PPU* ppu, CPU* cpu) {
 }
 
 #define FRAME_CYCLES 29780
+
+void set_key(Controller* c, bool v, SDL_Keycode key) {
+    switch (key) {
+    case SDLK_UP:
+        c->up = v;
+        break;
+    case SDLK_DOWN:
+        c->down = v;
+        break;
+    case SDLK_LEFT:
+        c->left = v;
+        break;
+    case SDLK_RIGHT:
+        c->right = v;
+        break;
+
+    case SDLK_Z:
+        c->b = v;
+        break;
+    case SDLK_X:
+        c->a = v;
+        break;
+
+    case SDLK_RETURN:
+        c->start = v;
+        break;
+    case SDLK_RSHIFT:
+        c->select = v;
+        break;
+    }
+}
+
+void handle_controller(SDL_Event e, Controller* c) {
+    switch (e.type) {
+    case SDL_EVENT_KEY_UP:
+        set_key(c, false, e.key.key);
+        break;
+    case SDL_EVENT_KEY_DOWN:
+        set_key(c, true, e.key.key);
+        break;
+    }
+}
 
 int main() {
     ByteSlice data;
@@ -199,11 +240,16 @@ int main() {
             case SDL_EVENT_QUIT:
                 running = false;
                 break;
+            default:
+                handle_controller(e, &cpu.p1);
+                break;
             }
         }
 
         for (int _ = 0; _ < FRAME_CYCLES; _++) {
             int cycles = cpu_step(&cpu, &ppu);
+            // if (cpu.PC < 0x8000 || cpu.PC > 0xFFFA)
+            //     exit(1);
             for (int i = 0; i < cycles * 3; i++) {
                 ppu_step(&ppu, &cpu);
             }

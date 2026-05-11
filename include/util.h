@@ -1,8 +1,11 @@
 #ifndef TYPES_H
 #define TYPES_H
 
+#define NO_DEBUG
+
 #include <aids.h>
 #include <stdint.h>
+#include <ints.h>
 
 typedef enum ResultKind ResultKind;
 enum ResultKind {
@@ -19,7 +22,7 @@ struct Result {
 typedef struct ByteSlice ByteSlice;
 struct ByteSlice {
     size_t size;
-    uint8_t* buf;
+    u8* buf;
 };
 
 Result Err(char* message);

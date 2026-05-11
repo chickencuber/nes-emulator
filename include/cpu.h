@@ -10,11 +10,13 @@
 #define DEF_OPCODES(...)                                                       \
     typedef enum Opcode Opcode;                                                \
     enum Opcode { __VA_ARGS__ };                                               \
-    static const char* opcode_list[] = {MAP(STR, __VA_ARGS__)};                       \
+    static const char* opcode_list[] = {MAP(STR, __VA_ARGS__)};                \
     static const size_t opcode_count = COUNT(__VA_ARGS__);
 
 #else
-#define DEF_OPCODES(...) enum Opcode { __VA_ARGS__ }
+#define DEF_OPCODES(...)                                                       \
+    typedef enum Opcode Opcode;                                                \
+    enum Opcode { __VA_ARGS__ }
 #endif
 
 #include <stdbool.h>
@@ -121,20 +123,24 @@ static inline bool page_crossed(u16 a, u16 b) {
     return (a & 0xFF00) != (b & 0xFF00);
 }
 
+// TASK(20260507-214301-213-n6-798): fill this table
 static int cycles_base[] = {
-    // TASK(20260507-214301-213-n6-798): fill this table
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-};
+    /* 0x00 */ 7, 6, 2, 8, 3, 3, 5, 5, 3, 2, 2, 2, 4, 4, 6, 6,
+    /* 0x10 */ 2, 5, 2, 8, 4, 4, 6, 6, 2, 4, 2, 7, 4, 4, 7, 7,
+    /* 0x20 */ 6, 6, 2, 8, 3, 3, 5, 5, 4, 2, 2, 2, 4, 4, 6, 6,
+    /* 0x30 */ 2, 5, 2, 8, 4, 4, 6, 6, 2, 4, 2, 7, 4, 4, 7, 7,
+    /* 0x40 */ 6, 6, 2, 8, 3, 3, 5, 5, 3, 2, 2, 2, 3, 4, 6, 6,
+    /* 0x50 */ 2, 5, 2, 8, 4, 4, 6, 6, 2, 4, 2, 7, 4, 4, 7, 7,
+    /* 0x60 */ 6, 6, 2, 8, 3, 3, 5, 5, 4, 2, 2, 2, 5, 4, 6, 6,
+    /* 0x70 */ 2, 5, 2, 8, 4, 4, 6, 6, 2, 4, 2, 7, 4, 4, 7, 7,
+    /* 0x80 */ 2, 6, 2, 6, 3, 3, 3, 3, 2, 2, 2, 2, 4, 4, 4, 4,
+    /* 0x90 */ 2, 6, 2, 6, 4, 4, 4, 4, 2, 5, 2, 5, 5, 5, 5, 5,
+    /* 0xA0 */ 2, 6, 2, 6, 3, 3, 3, 3, 2, 2, 2, 2, 4, 4, 4, 4,
+    /* 0xB0 */ 2, 5, 2, 5, 4, 4, 4, 4, 2, 4, 2, 4, 4, 4, 4, 4,
+    /* 0xC0 */ 2, 6, 2, 8, 3, 3, 5, 5, 2, 2, 2, 2, 4, 4, 6, 6,
+    /* 0xD0 */ 2, 5, 2, 8, 4, 4, 6, 6, 2, 4, 2, 7, 4, 4, 7, 7,
+    /* 0xE0 */ 2, 6, 2, 8, 3, 3, 5, 5, 2, 2, 2, 2, 4, 4, 6, 6,
+    /* 0xF0 */ 2, 5, 2, 8, 4, 4, 6, 6, 2, 4, 2, 7, 4, 4, 7, 7};
 
 typedef struct CartridgeInfo CartridgeInfo;
 struct CartridgeInfo {
@@ -150,6 +156,11 @@ struct Cartridge {
     CartridgeInfo info;
 };
 
+typedef struct Controller Controller;
+struct Controller {
+    bool up, down, left, right, a, b, select, start;
+};
+
 typedef struct CPU CPU;
 struct CPU {
     u8 A;   //  accumulator
@@ -161,6 +172,7 @@ struct CPU {
     u8 cpu_ram[2048];
     Cartridge* cart; // rom and such
     bool nmi_pending;
+    Controller p1, p2;
 };
 
 typedef struct PPU PPU;
@@ -185,6 +197,8 @@ struct PPU {
     u8 fine_x;
     u8 open_bus;
     u8 latch;
+    int scroll_x, scroll_y;
+    u8 oam[256];
 };
 
 typedef enum Flag Flag;
